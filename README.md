@@ -2,6 +2,12 @@
 
 Desktop AI-assisted code review prototype built with `gpui`.
 
+# Project Goal
+
+The goal of this project is to create a pretty good code review tool that helps engineers understand code faster. It must be performant to handle very large diffs, integrate github discussions, and LLMs to help with the code review process.
+
+The primary function is faster understanding of the code being changed.
+
 ## Current state
 
 - Native 3-pane review shell
