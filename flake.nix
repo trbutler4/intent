@@ -58,6 +58,7 @@
               cargo-nextest
               clang
               cmake
+              git
               pkg-config
               python3
             ] ++ linuxLibraries;
