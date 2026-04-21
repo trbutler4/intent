@@ -30,6 +30,14 @@ Inside the dev shell, run:
 cargo run
 ```
 
+From a graphical desktop session, the one-shot command is:
+
+```sh
+nix develop path:. -c cargo run
+```
+
+This app needs a Wayland or X11 session. It will not open from a plain TTY without `DISPLAY` or `WAYLAND_DISPLAY`.
+
 ## Build Check
 
 Validated with:
