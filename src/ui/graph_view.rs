@@ -3,7 +3,7 @@ use gpui::{
     div, px, prelude::*, rgb,
 };
 
-use crate::analysis::{FlowNodeType, GraphLayout, LayoutEdge, LayoutNode};
+use crate::analysis::{FlowNodeType, GraphLayout, LayoutEdge};
 use crate::ui::theme::render_empty_state;
 
 const NODE_CORNER_RADIUS: f32 = 6.0;
@@ -16,6 +16,7 @@ fn node_border_color(node_type: FlowNodeType) -> Hsla {
         FlowNodeType::Variable => rgb(0x7ee787).into(),
         FlowNodeType::Input => rgb(0xf2cc60).into(),
         FlowNodeType::Output => rgb(0xc297ff).into(),
+        FlowNodeType::Type => rgb(0xffa657).into(),
     }
 }
 
@@ -25,6 +26,17 @@ fn node_bg_color(node_type: FlowNodeType) -> Hsla {
         FlowNodeType::Variable => rgb(0x12261a).into(),
         FlowNodeType::Input => rgb(0x2a2410).into(),
         FlowNodeType::Output => rgb(0x1a1030).into(),
+        FlowNodeType::Type => rgb(0x2a1c10).into(),
+    }
+}
+
+fn node_type_label(node_type: FlowNodeType) -> &'static str {
+    match node_type {
+        FlowNodeType::Function => "fn",
+        FlowNodeType::Variable => "let",
+        FlowNodeType::Input => "in",
+        FlowNodeType::Output => "out",
+        FlowNodeType::Type => "type",
     }
 }
 
@@ -57,6 +69,53 @@ pub(crate) fn render_graph_view(
         let pan = state.pan_offset;
         let zoom = state.zoom;
 
+        let node_elements = layout.nodes.iter().map(|node| {
+            let label = layout.labels.get(node.label_index).cloned().unwrap_or_default();
+            let border = node_border_color(node.node_type);
+            let bg = node_bg_color(node.node_type);
+            let tag = node_type_label(node.node_type);
+            let tag_color = border;
+            let z = zoom;
+            let nx = node.x;
+            let ny = node.y;
+            let nw = node.width;
+            let nh = node.height;
+
+            div()
+                .absolute()
+                .left(px(nx * z) + pan.x)
+                .top(px(ny * z) + pan.y)
+                .w(px(nw * z))
+                .h(px(nh * z))
+                .rounded(px(NODE_CORNER_RADIUS * z))
+                .bg(bg)
+                .border_1()
+                .border_color(border)
+                .flex()
+                .items_center()
+                .px(px(8.0 * z))
+                .gap(px(6.0 * z))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .rounded(px(3.0 * z))
+                        .bg(tag_color.opacity(0.2))
+                        .px(px(4.0 * z))
+                        .py(px(1.0 * z))
+                        .text_size(px(10.0 * z))
+                        .text_color(tag_color)
+                        .child(tag.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0 * z))
+                        .text_color(rgb(0xe5eefc))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(label),
+                )
+        }).collect::<Vec<_>>();
+
         div()
             .id("graph-scroll")
             .flex_1()
@@ -70,24 +129,29 @@ pub(crate) fn render_graph_view(
                 cx.notify();
             }))
             .child(
-                gpui::canvas(
-                    move |_bounds, _window, _cx| {
-                        layout_clone.clone()
-                    },
-                    move |bounds: Bounds<gpui::Pixels>, layout: GraphLayout, window: &mut Window, _cx: &mut App| {
-                        let origin_x = bounds.origin.x + pan.x;
-                        let origin_y = bounds.origin.y + pan.y;
+                div()
+                    .relative()
+                    .size_full()
+                    .child(
+                        gpui::canvas(
+                            move |_bounds, _window, _cx| {
+                                layout_clone.clone()
+                            },
+                            move |bounds: Bounds<gpui::Pixels>, layout: GraphLayout, window: &mut Window, _cx: &mut App| {
+                                let origin_x = bounds.origin.x + pan.x;
+                                let origin_y = bounds.origin.y + pan.y;
 
-                        for edge in &layout.edges {
-                            draw_edge(window, edge, origin_x, origin_y, zoom);
-                        }
-
-                        for node in &layout.nodes {
-                            draw_node(window, node, origin_x, origin_y, zoom);
-                        }
-                    },
-                )
-                .size_full(),
+                                for edge in &layout.edges {
+                                    draw_edge(window, edge, origin_x, origin_y, zoom);
+                                }
+                            },
+                        )
+                        .size_full()
+                        .absolute()
+                        .top_0()
+                        .left_0(),
+                    )
+                    .children(node_elements),
             )
     } else {
         div()
@@ -155,35 +219,6 @@ pub(crate) fn render_graph_view(
                 ),
         )
         .child(body)
-}
-
-fn draw_node(
-    window: &mut Window,
-    node: &LayoutNode,
-    origin_x: gpui::Pixels,
-    origin_y: gpui::Pixels,
-    zoom: f32,
-) {
-    let x = origin_x + px(node.x * zoom);
-    let y = origin_y + px(node.y * zoom);
-    let w = px(node.width * zoom);
-    let h = px(node.height * zoom);
-
-    let node_type = FlowNodeType::Function;
-    let bg = node_bg_color(node_type);
-    let border = node_border_color(node_type);
-
-    let bounds = Bounds::new(Point::new(x, y), gpui::size(w, h));
-    let corner = gpui::Corners::all(px(NODE_CORNER_RADIUS * zoom));
-
-    window.paint_quad(gpui::quad(
-        bounds,
-        corner,
-        bg,
-        gpui::Edges::all(px(1.0)),
-        border,
-        gpui::BorderStyle::Solid,
-    ));
 }
 
 fn draw_edge(

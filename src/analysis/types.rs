@@ -6,6 +6,7 @@ pub(crate) enum FlowNodeType {
     Variable,
     Input,
     Output,
+    Type,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -43,6 +44,8 @@ impl DataFlowGraph {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LayoutNode {
     pub(crate) id: usize,
+    pub(crate) node_type: FlowNodeType,
+    pub(crate) label_index: usize,
     pub(crate) x: f32,
     pub(crate) y: f32,
     pub(crate) width: f32,
@@ -60,6 +63,7 @@ pub(crate) struct LayoutEdge {
 pub(crate) struct GraphLayout {
     pub(crate) nodes: Vec<LayoutNode>,
     pub(crate) edges: Vec<LayoutEdge>,
+    pub(crate) labels: Vec<String>,
     pub(crate) total_width: f32,
     pub(crate) total_height: f32,
 }

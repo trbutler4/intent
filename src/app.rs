@@ -117,6 +117,7 @@ impl ReviewApp {
             self.flow_layouts.insert(path.clone(), GraphLayout {
                 nodes: Vec::new(),
                 edges: Vec::new(),
+                labels: Vec::new(),
                 total_width: 0.0,
                 total_height: 0.0,
             });
@@ -131,6 +132,7 @@ impl ReviewApp {
                 self.flow_layouts.insert(path.clone(), GraphLayout {
                     nodes: Vec::new(),
                     edges: Vec::new(),
+                    labels: Vec::new(),
                     total_width: 0.0,
                     total_height: 0.0,
                 });
