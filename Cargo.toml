@@ -2,6 +2,17 @@
 name = "review-tool"
 version = "0.1.0"
 edition = "2021"
+default-run = "review-tui"
 
 [dependencies]
+crossterm = "0.28"
 gpui = "0.2.2"
+ratatui = "0.29"
+
+[[bin]]
+name = "review-gui"
+path = "src/bin/gui.rs"
+
+[[bin]]
+name = "review-tui"
+path = "src/bin/tui.rs"
