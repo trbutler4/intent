@@ -11,7 +11,8 @@ struct ReviewGui {
 impl ReviewGui {
     fn new() -> Self {
         Self {
-            session: ReviewSession::mock(),
+            session: ReviewSession::load_current_worktree()
+                .unwrap_or_else(|error| ReviewSession::from_error(error.to_string())),
         }
     }
 
@@ -32,7 +33,7 @@ impl Render for ReviewGui {
                     .size_full()
                     .flex()
                     .flex_col()
-                    .child(render_header())
+                    .child(render_header(&self.session))
                     .child(
                         div()
                             .flex_1()
@@ -43,6 +44,7 @@ impl Render for ReviewGui {
                             .child(render_diff_view(
                                 self.session.selected_file(),
                                 self.session.diff_lines(),
+                                self.session.selected_diff_line_index(),
                             ))
                             .child(self.render_findings_panel(cx)),
                     ),
@@ -66,7 +68,16 @@ impl ReviewGui {
                 "Changed Files",
                 &format!("{} files", self.session.files().len()),
             ))
-            .child(
+            .child(if self.session.files().is_empty() {
+                div()
+                    .id("file-list-scroll")
+                    .flex_1()
+                    .p_4()
+                    .child(render_empty_state(
+                        "No changed files",
+                        self.session.review_summary(),
+                    ))
+            } else {
                 div()
                     .id("file-list-scroll")
                     .flex_1()
@@ -123,8 +134,8 @@ impl ReviewGui {
                                     )
                                     .child(div().text_xs().text_color(rgb(0x91a3c0)).child(stats))
                             }),
-                    ),
-            )
+                    )
+            })
     }
 
     fn render_findings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -158,9 +169,18 @@ impl ReviewGui {
                             .text_color(rgb(0x91a3c0))
                             .child("Review summary"),
                     )
-                    .child(div().text_sm().child(self.session.review_summary())),
+                    .child(div().text_sm().child(self.session.review_summary().to_owned())),
             )
-            .child(
+            .child(if self.session.findings().is_empty() {
+                div()
+                    .id("findings-scroll")
+                    .flex_1()
+                    .p_3()
+                    .child(render_empty_state(
+                        "No AI findings yet",
+                        "The review engine is showing real Git changes. An AI findings backend is not wired in yet.",
+                    ))
+            } else {
                 div()
                     .id("findings-scroll")
                     .flex_1()
@@ -218,13 +238,13 @@ impl ReviewGui {
                                 .child(div().text_xs().text_color(rgb(0x91a3c0)).child(line))
                                 .child(div().text_sm().child(summary))
                         },
-                    )),
-            )
+                    ))
+            })
             .child(render_selected_finding(selected_finding))
     }
 }
 
-fn render_header() -> impl IntoElement {
+fn render_header(session: &ReviewSession) -> impl IntoElement {
     div()
         .flex()
         .justify_between()
@@ -248,16 +268,40 @@ fn render_header() -> impl IntoElement {
                     div()
                         .text_sm()
                         .text_color(rgb(0x91a3c0))
-                        .child("AI-assisted review shell built with gpui"),
+                        .child("AI-assisted review shell backed by the current Git working tree"),
                 ),
         )
         .child(
             div()
                 .flex()
                 .gap_2()
-                .child(render_pill("repo", "zed-industries/zed"))
-                .child(render_pill("review", "main...feature/ai-review"))
-                .child(render_pill("model", "mock:gpt-reviewer")),
+                .child(render_pill("repo", session.repo_label()))
+                .child(render_pill("review", session.review_label()))
+                .child(render_pill("ai", session.backend_label())),
+        )
+}
+
+fn render_empty_state(title: &str, body: &str) -> impl IntoElement {
+    div()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(0x22304f))
+        .bg(rgb(0x0d1422))
+        .p_3()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::BOLD)
+                .child(title.to_owned()),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(0x91a3c0))
+                .child(body.to_owned()),
         )
 }
 
@@ -313,6 +357,7 @@ fn render_badge(label: &str, color: Hsla) -> impl IntoElement {
 fn render_diff_view(
     selected_file: Option<&FileChange>,
     diff_lines: &[DiffLine],
+    selected_diff_line: Option<usize>,
 ) -> impl IntoElement {
     let subtitle = selected_file
         .map(|file| file.path.as_str())
@@ -320,7 +365,7 @@ fn render_diff_view(
     let context = selected_file
         .map(|file| {
             format!(
-                "Mock review context for {} ({} additions, {} deletions)",
+                "Git diff for {} ({} additions, {} deletions)",
                 file.status, file.additions, file.deletions
             )
         })
@@ -355,11 +400,13 @@ fn render_diff_view(
                 .flex()
                 .flex_col()
                 .gap_1()
-                .children(diff_lines.iter().map(render_diff_line)),
+                .children(diff_lines.iter().enumerate().map(|(index, line)| {
+                    render_diff_line(line, selected_diff_line == Some(index))
+                })),
         )
 }
 
-fn render_diff_line(line: &DiffLine) -> impl IntoElement {
+fn render_diff_line(line: &DiffLine, selected: bool) -> impl IntoElement {
     let color = match line.prefix.as_str() {
         "+" => rgb(0x7ee787),
         "-" => rgb(0xff7b72),
@@ -367,12 +414,17 @@ fn render_diff_line(line: &DiffLine) -> impl IntoElement {
         _ => rgb(0xe5eefc),
     };
 
-    let background = match line.prefix.as_str() {
-        "+" => rgb(0x12261a),
-        "-" => rgb(0x2a1417),
-        "@@" => rgb(0x0f2238),
-        _ => rgb(0x0f1728),
+    let background = if selected {
+        rgb(0x172544)
+    } else {
+        match line.prefix.as_str() {
+            "+" => rgb(0x12261a),
+            "-" => rgb(0x2a1417),
+            "@@" => rgb(0x0f2238),
+            _ => rgb(0x0f1728),
+        }
     };
+    let border = if selected { rgb(0x4f8cff) } else { background };
 
     div()
         .flex()
@@ -380,6 +432,8 @@ fn render_diff_line(line: &DiffLine) -> impl IntoElement {
         .items_start()
         .rounded_sm()
         .bg(background)
+        .border_l_2()
+        .border_color(border)
         .px_2()
         .py_1()
         .child(
@@ -406,15 +460,18 @@ fn render_selected_finding(selected_finding: Option<&Finding>) -> impl IntoEleme
         .unwrap_or_else(|| "none".to_owned());
     let summary = selected_finding
         .map(|finding| finding.summary.clone())
-        .unwrap_or_else(|| "Select a finding to see details.".to_owned());
+        .unwrap_or_else(|| "No AI findings yet. The real Git diff is loaded, but a review backend is not configured.".to_owned());
     let next_step = selected_finding
         .map(|finding| {
             format!(
-                "Suggested next step: bind {} to a real git diff parser and send only the active hunk plus nearby context to the model.",
+                "Suggested next step: inspect {} and decide whether to comment on the active hunk.",
                 finding.line
             )
         })
-        .unwrap_or_else(|| "Suggested next step: select a finding.".to_owned());
+        .unwrap_or_else(|| {
+            "Suggested next step: wire an AI review backend that consumes the selected file diff."
+                .to_owned()
+        });
 
     div()
         .border_t_1()

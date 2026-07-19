@@ -7,9 +7,9 @@ AI-assisted code review prototype with a shared review engine and separate GPUI/
 - Shared review engine for files, diff lines, findings, and selection actions
 - Native 3-pane GPUI review shell
 - Terminal 3-pane TUI review shell
-- Mock changed files list
-- Mock unified diff viewer
-- Mock AI findings panel
+- Real Git working-tree changed files
+- Real unified diff viewer for staged, unstaged, and untracked text files
+- Empty AI findings panel ready for a review backend
 - Selection state for files and findings
 
 ## Nix Shell
@@ -52,6 +52,13 @@ nix develop path:. -c cargo run
 
 The GPUI app needs a Wayland or X11 session. It will not open from a plain TTY without `DISPLAY` or `WAYLAND_DISPLAY`. The TUI runs directly in a terminal.
 
+## TUI Controls
+
+- `tab`, `h`, `l`, left, right switch panes
+- `j`, `k`, up, down move within the focused pane
+- `n`, `p`, `]`, `[` jump between changed blocks in the diff
+- `q` or `esc` quits
+
 ## Build Check
 
 Validated with:
@@ -62,7 +69,6 @@ nix develop path:. -c cargo check
 
 ## Next steps
 
-1. Replace mock data with `git diff` output.
-2. Add hunk selection and context budgeting.
-3. Plug in a real model backend.
-4. Persist review sessions and inline comments.
+1. Add hunk selection and context budgeting.
+2. Plug in a real model backend.
+3. Persist review sessions and inline comments.
