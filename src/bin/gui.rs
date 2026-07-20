@@ -44,7 +44,7 @@ impl Render for ReviewGui {
                             .child(render_diff_view(
                                 self.session.selected_file(),
                                 self.session.diff_lines(),
-                                self.session.selected_diff_line_index(),
+                                self.session.selected_diff_change_range(),
                             ))
                             .child(self.render_findings_panel(cx)),
                     ),
@@ -357,7 +357,7 @@ fn render_badge(label: &str, color: Hsla) -> impl IntoElement {
 fn render_diff_view(
     selected_file: Option<&FileChange>,
     diff_lines: &[DiffLine],
-    selected_diff_line: Option<usize>,
+    selected_diff_change_range: Option<std::ops::Range<usize>>,
 ) -> impl IntoElement {
     let subtitle = selected_file
         .map(|file| file.path.as_str())
@@ -401,7 +401,12 @@ fn render_diff_view(
                 .flex_col()
                 .gap_1()
                 .children(diff_lines.iter().enumerate().map(|(index, line)| {
-                    render_diff_line(line, selected_diff_line == Some(index))
+                    render_diff_line(
+                        line,
+                        selected_diff_change_range
+                            .as_ref()
+                            .is_some_and(|range| range.contains(&index)),
+                    )
                 })),
         )
 }

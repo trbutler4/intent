@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt, fs, io,
+    ops::Range,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -233,6 +234,10 @@ impl ReviewSession {
             .position(|index| *index == self.selected_diff_line)?;
 
         Some((position + 1, indices.len()))
+    }
+
+    pub fn selected_diff_change_range(&self) -> Option<Range<usize>> {
+        selected_diff_change_range(self.diff_lines(), self.selected_diff_line)
     }
 
     pub fn selected_file_index(&self) -> usize {
@@ -552,6 +557,27 @@ fn diff_change_indices(diff: &[DiffLine]) -> Vec<usize> {
         .collect()
 }
 
+fn selected_diff_change_range(
+    diff: &[DiffLine],
+    selected_diff_line: usize,
+) -> Option<Range<usize>> {
+    if selected_diff_line >= diff.len() || !is_changed_line(&diff[selected_diff_line]) {
+        return None;
+    }
+
+    let mut start = selected_diff_line;
+    while start > 0 && is_changed_line(&diff[start - 1]) {
+        start -= 1;
+    }
+
+    let mut end = selected_diff_line + 1;
+    while end < diff.len() && is_changed_line(&diff[end]) {
+        end += 1;
+    }
+
+    Some(start..end)
+}
+
 fn is_changed_line(line: &DiffLine) -> bool {
     matches!(line.prefix.as_str(), "+" | "-")
 }
@@ -716,10 +742,12 @@ mod tests {
 
         assert_eq!(session.selected_diff_line_index(), Some(1));
         assert_eq!(session.selected_diff_change_position(), Some((1, 2)));
+        assert_eq!(session.selected_diff_change_range(), Some(1..2));
 
         session.apply(ReviewAction::NextDiffChange);
         assert_eq!(session.selected_diff_line_index(), Some(3));
         assert_eq!(session.selected_diff_change_position(), Some((2, 2)));
+        assert_eq!(session.selected_diff_change_range(), Some(3..5));
 
         session.apply(ReviewAction::NextDiffChange);
         assert_eq!(session.selected_diff_line_index(), Some(1));
