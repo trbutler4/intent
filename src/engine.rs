@@ -1,10 +1,13 @@
 use std::{
+    collections::BTreeSet,
     error::Error,
     fmt, fs, io,
     ops::Range,
     path::{Path, PathBuf},
     process::Command,
 };
+
+use rusqlite::{params, Connection};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileChange {
@@ -33,6 +36,7 @@ pub struct DiffLine {
 pub enum ReviewAction {
     SelectFile(usize),
     SelectFinding(usize),
+    ToggleSelectedFileReviewed,
     NextDiffChange,
     PreviousDiffChange,
     NextFile,
@@ -44,6 +48,7 @@ pub enum ReviewAction {
 #[derive(Debug)]
 pub enum ReviewError {
     Io(io::Error),
+    Sqlite(rusqlite::Error),
     Git { command: String, stderr: String },
 }
 
@@ -51,6 +56,7 @@ impl fmt::Display for ReviewError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "{error}"),
+            Self::Sqlite(error) => write!(formatter, "sqlite error: {error}"),
             Self::Git { command, stderr } => {
                 if stderr.trim().is_empty() {
                     write!(formatter, "git command failed: {command}")
@@ -70,6 +76,7 @@ impl Error for ReviewError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
+            Self::Sqlite(error) => Some(error),
             Self::Git { .. } => None,
         }
     }
@@ -78,6 +85,12 @@ impl Error for ReviewError {
 impl From<io::Error> for ReviewError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<rusqlite::Error> for ReviewError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite(error)
     }
 }
 
@@ -93,6 +106,15 @@ pub struct ReviewSession {
     files: Vec<FileChange>,
     diffs: Vec<Vec<DiffLine>>,
     findings: Vec<Finding>,
+    reviewed_files: BTreeSet<String>,
+    persistence: Option<PersistenceContext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PersistenceContext {
+    db_path: PathBuf,
+    review_key: String,
+    file_hashes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +130,7 @@ impl ReviewSession {
 
     pub fn load_from_repo(path: impl AsRef<Path>) -> Result<Self, ReviewError> {
         let repo_root = repo_root(path.as_ref())?;
+        let review_key = review_key(&repo_root);
         let status_entries = git_status_entries(&repo_root)?;
         let mut files = Vec::with_capacity(status_entries.len());
         let mut diffs = Vec::with_capacity(status_entries.len());
@@ -128,6 +151,13 @@ impl ReviewSession {
             });
             diffs.push(diff);
         }
+        let file_hashes = diffs.iter().map(|diff| diff_hash(diff)).collect::<Vec<_>>();
+        let persistence = PersistenceContext {
+            db_path: review_db_path(&repo_root)?,
+            review_key,
+            file_hashes,
+        };
+        let reviewed_files = load_reviewed_files(&persistence, &files)?;
 
         let review_summary = if files.is_empty() {
             "Working tree is clean. No changed files to review.".to_owned()
@@ -154,6 +184,8 @@ impl ReviewSession {
             files,
             diffs,
             findings: Vec::new(),
+            reviewed_files,
+            persistence: Some(persistence),
         })
     }
 
@@ -169,6 +201,8 @@ impl ReviewSession {
             files: Vec::new(),
             diffs: Vec::new(),
             findings: Vec::new(),
+            reviewed_files: BTreeSet::new(),
+            persistence: None,
         }
     }
 
@@ -176,6 +210,7 @@ impl ReviewSession {
         match action {
             ReviewAction::SelectFile(index) => self.select_file(index),
             ReviewAction::SelectFinding(index) => self.select_finding(index),
+            ReviewAction::ToggleSelectedFileReviewed => self.toggle_selected_file_reviewed(),
             ReviewAction::NextDiffChange => self.next_diff_change(),
             ReviewAction::PreviousDiffChange => self.previous_diff_change(),
             ReviewAction::NextFile => {
@@ -207,6 +242,23 @@ impl ReviewSession {
 
     pub fn files(&self) -> &[FileChange] {
         &self.files
+    }
+
+    pub fn is_file_reviewed(&self, index: usize) -> bool {
+        self.files
+            .get(index)
+            .is_some_and(|file| self.reviewed_files.contains(&file.path))
+    }
+
+    pub fn reviewed_file_count(&self) -> usize {
+        self.files
+            .iter()
+            .filter(|file| self.reviewed_files.contains(&file.path))
+            .count()
+    }
+
+    pub fn pending_file_count(&self) -> usize {
+        self.files.len().saturating_sub(self.reviewed_file_count())
     }
 
     pub fn findings(&self) -> &[Finding] {
@@ -274,6 +326,38 @@ impl ReviewSession {
         }
     }
 
+    fn toggle_selected_file_reviewed(&mut self) {
+        let Some(path) = self.selected_file().map(|file| file.path.clone()) else {
+            return;
+        };
+        let reviewed = !self.reviewed_files.contains(&path);
+
+        if let Err(error) = self.persist_file_reviewed(&path, reviewed) {
+            self.review_summary = format!("Failed to persist reviewed state: {error}");
+            return;
+        }
+
+        if reviewed {
+            self.reviewed_files.insert(path);
+        } else {
+            self.reviewed_files.remove(&path);
+        }
+    }
+
+    fn persist_file_reviewed(&self, path: &str, reviewed: bool) -> Result<(), ReviewError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        let Some(file_index) = self.files.iter().position(|file| file.path == path) else {
+            return Ok(());
+        };
+        let Some(diff_hash) = persistence.file_hashes.get(file_index) else {
+            return Ok(());
+        };
+
+        set_file_reviewed(persistence, path, diff_hash, reviewed)
+    }
+
     fn next_diff_change(&mut self) {
         let indices = diff_change_indices(self.diff_lines());
         if indices.is_empty() {
@@ -339,6 +423,92 @@ fn review_label(repo_root: &Path) -> String {
         Ok(branch) if !branch.trim().is_empty() => format!("{} working tree", branch.trim()),
         _ => "working tree".to_owned(),
     }
+}
+
+fn review_key(repo_root: &Path) -> String {
+    match git_output(repo_root, &["branch", "--show-current"]) {
+        Ok(branch) if !branch.trim().is_empty() => format!("branch:{}", branch.trim()),
+        _ => match git_output(repo_root, &["rev-parse", "HEAD"]) {
+            Ok(head) => format!("detached:{}", head.trim()),
+            Err(_) => "working-tree".to_owned(),
+        },
+    }
+}
+
+fn review_db_path(repo_root: &Path) -> Result<PathBuf, ReviewError> {
+    let intent_dir = repo_root.join(".intent");
+    fs::create_dir_all(&intent_dir)?;
+
+    Ok(intent_dir.join("review-tool.sqlite3"))
+}
+
+fn load_reviewed_files(
+    persistence: &PersistenceContext,
+    files: &[FileChange],
+) -> Result<BTreeSet<String>, ReviewError> {
+    let connection = open_review_db(&persistence.db_path)?;
+    let mut reviewed_files = BTreeSet::new();
+
+    for (index, file) in files.iter().enumerate() {
+        let Some(diff_hash) = persistence.file_hashes.get(index) else {
+            continue;
+        };
+        let reviewed = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM reviewed_files
+                WHERE review_key = ?1 AND path = ?2 AND diff_hash = ?3
+            )",
+            params![persistence.review_key, file.path, diff_hash],
+            |row| row.get::<_, bool>(0),
+        )?;
+
+        if reviewed {
+            reviewed_files.insert(file.path.clone());
+        }
+    }
+
+    Ok(reviewed_files)
+}
+
+fn set_file_reviewed(
+    persistence: &PersistenceContext,
+    path: &str,
+    diff_hash: &str,
+    reviewed: bool,
+) -> Result<(), ReviewError> {
+    let connection = open_review_db(&persistence.db_path)?;
+
+    if reviewed {
+        connection.execute(
+            "INSERT OR REPLACE INTO reviewed_files
+                (review_key, path, diff_hash, reviewed_at)
+             VALUES (?1, ?2, ?3, unixepoch())",
+            params![persistence.review_key, path, diff_hash],
+        )?;
+    } else {
+        connection.execute(
+            "DELETE FROM reviewed_files
+             WHERE review_key = ?1 AND path = ?2 AND diff_hash = ?3",
+            params![persistence.review_key, path, diff_hash],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn open_review_db(path: &Path) -> Result<Connection, ReviewError> {
+    let connection = Connection::open(path)?;
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS reviewed_files (
+            review_key TEXT NOT NULL,
+            path TEXT NOT NULL,
+            diff_hash TEXT NOT NULL,
+            reviewed_at INTEGER NOT NULL,
+            PRIMARY KEY (review_key, path, diff_hash)
+        );",
+    )?;
+
+    Ok(connection)
 }
 
 fn git_status_entries(repo_root: &Path) -> Result<Vec<StatusEntry>, ReviewError> {
@@ -540,6 +710,28 @@ fn diff_stats(diff: &[DiffLine]) -> (usize, usize) {
     })
 }
 
+fn diff_hash(diff: &[DiffLine]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+
+    for line in diff {
+        hash_bytes(&mut hash, line.prefix.as_bytes());
+        hash_bytes(&mut hash, &[0]);
+        hash_bytes(&mut hash, line.number.as_bytes());
+        hash_bytes(&mut hash, &[0]);
+        hash_bytes(&mut hash, line.content.as_bytes());
+        hash_bytes(&mut hash, &[0xff]);
+    }
+
+    format!("{hash:016x}")
+}
+
+fn hash_bytes(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+}
+
 fn first_diff_change_index(diff: &[DiffLine]) -> Option<usize> {
     diff_change_indices(diff).into_iter().next()
 }
@@ -614,6 +806,8 @@ fn git_output_bytes(repo_root: &Path, args: &[&str]) -> Result<Vec<u8>, ReviewEr
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{
         parse_hunk_header, parse_unified_diff, DiffLine, FileChange, ReviewAction, ReviewSession,
     };
@@ -688,6 +882,8 @@ mod tests {
                 ],
             ],
             findings: Vec::new(),
+            reviewed_files: BTreeSet::new(),
+            persistence: None,
         }
     }
 
@@ -754,5 +950,24 @@ mod tests {
 
         session.apply(ReviewAction::PreviousDiffChange);
         assert_eq!(session.selected_diff_line_index(), Some(3));
+    }
+
+    #[test]
+    fn toggles_selected_file_reviewed_state() {
+        let mut session = test_session();
+
+        assert_eq!(session.pending_file_count(), 2);
+        assert_eq!(session.reviewed_file_count(), 0);
+        assert!(!session.is_file_reviewed(0));
+
+        session.apply(ReviewAction::ToggleSelectedFileReviewed);
+        assert!(session.is_file_reviewed(0));
+        assert_eq!(session.pending_file_count(), 1);
+        assert_eq!(session.reviewed_file_count(), 1);
+
+        session.apply(ReviewAction::ToggleSelectedFileReviewed);
+        assert!(!session.is_file_reviewed(0));
+        assert_eq!(session.pending_file_count(), 2);
+        assert_eq!(session.reviewed_file_count(), 0);
     }
 }

@@ -8,6 +8,7 @@ default-run = "review-tui"
 crossterm = "0.28"
 gpui = "0.2.2"
 ratatui = "0.29"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [[bin]]
 name = "review-gui"

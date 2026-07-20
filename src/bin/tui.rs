@@ -38,31 +38,33 @@ enum FocusPane {
     Findings,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileTreeMode {
+    ReviewStatus,
+    FullTree,
+}
+
 struct TuiState {
     focus: FocusPane,
     diff_scroll: u16,
     expanded_dirs: BTreeSet<String>,
     file_cursor: usize,
+    file_tree_mode: FileTreeMode,
 }
 
 impl TuiState {
     fn new(session: &ReviewSession) -> Self {
         let expanded_dirs = directory_paths(session.files());
-        let rows = visible_file_rows(session.files(), &expanded_dirs);
-        let file_cursor = rows
-            .iter()
-            .position(|row| match row {
-                FileTreeRow::File { index, .. } => *index == session.selected_file_index(),
-                FileTreeRow::Directory { .. } => false,
-            })
-            .unwrap_or(0);
-
-        Self {
+        let mut state = Self {
             focus: FocusPane::Files,
             diff_scroll: 0,
             expanded_dirs,
-            file_cursor,
-        }
+            file_cursor: 0,
+            file_tree_mode: FileTreeMode::ReviewStatus,
+        };
+
+        sync_file_cursor_to_selected(session, &mut state);
+        state
     }
 }
 
@@ -88,6 +90,12 @@ impl FileTreeNode {
 }
 
 enum FileTreeRow {
+    Section {
+        name: String,
+        file_count: usize,
+        additions: usize,
+        deletions: usize,
+    },
     Directory {
         path: String,
         name: String,
@@ -144,6 +152,18 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut session: ReviewSession) -
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
             KeyCode::Tab => state.focus = next_focus(state.focus),
+            KeyCode::Char('1') => {
+                state.file_tree_mode = FileTreeMode::FullTree;
+                sync_file_cursor_to_selected(&session, &mut state);
+            }
+            KeyCode::Char('2') => {
+                state.file_tree_mode = FileTreeMode::ReviewStatus;
+                sync_file_cursor_to_selected(&session, &mut state);
+            }
+            KeyCode::Char('r') => {
+                session.apply(ReviewAction::ToggleSelectedFileReviewed);
+                sync_file_cursor_to_selected(&session, &mut state);
+            }
             KeyCode::Left | KeyCode::Char('h') => {
                 if state.focus == FocusPane::Files {
                     collapse_file_tree_row(&session, &mut state);
@@ -269,7 +289,7 @@ fn render_files(
     state: &mut TuiState,
     focused: bool,
 ) {
-    let rows = visible_file_rows(session.files(), &state.expanded_dirs);
+    let rows = visible_file_rows(session, state);
     clamp_file_cursor(state, rows.len());
 
     let items = if session.files().is_empty() {
@@ -282,7 +302,7 @@ fn render_files(
         ])]
     } else {
         rows.iter()
-            .map(|row| render_file_tree_row(row, session.files()))
+            .map(|row| render_file_tree_row(row, session))
             .collect::<Vec<_>>()
     };
     let mut list_state = ListState::default();
@@ -291,7 +311,7 @@ fn render_files(
     }
     let list = List::new(items)
         .block(panel_block(
-            format!("files ({})", session.files().len()),
+            file_panel_title(session, state.file_tree_mode),
             focused,
         ))
         .style(base())
@@ -300,8 +320,31 @@ fn render_files(
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
-fn render_file_tree_row(row: &FileTreeRow, files: &[FileChange]) -> ListItem<'static> {
+fn file_panel_title(session: &ReviewSession, mode: FileTreeMode) -> String {
+    match mode {
+        FileTreeMode::ReviewStatus => format!(
+            "files  {} todo / {} done",
+            session.pending_file_count(),
+            session.reviewed_file_count()
+        ),
+        FileTreeMode::FullTree => format!("files  tree ({})", session.files().len()),
+    }
+}
+
+fn render_file_tree_row(row: &FileTreeRow, session: &ReviewSession) -> ListItem<'static> {
     match row {
+        FileTreeRow::Section {
+            name,
+            file_count,
+            additions,
+            deletions,
+        } => ListItem::new(Line::from(vec![
+            Span::styled(name.clone(), label_style()),
+            Span::styled(
+                format!("  {file_count} files  +{additions} -{deletions}"),
+                muted(),
+            ),
+        ])),
         FileTreeRow::Directory {
             name,
             depth,
@@ -325,9 +368,15 @@ fn render_file_tree_row(row: &FileTreeRow, files: &[FileChange]) -> ListItem<'st
         FileTreeRow::File {
             index, name, depth, ..
         } => {
-            let file = &files[*index];
+            let file = &session.files()[*index];
+            let reviewed = if session.is_file_reviewed(*index) {
+                "[x] "
+            } else {
+                "[ ] "
+            };
             ListItem::new(Line::from(vec![
                 Span::styled(indent(*depth), muted()),
+                Span::styled(reviewed, muted()),
                 Span::styled(format!("{} ", file.status), status_style(&file.status)),
                 Span::styled(name.clone(), base().fg(FG)),
                 Span::styled(
@@ -340,7 +389,7 @@ fn render_file_tree_row(row: &FileTreeRow, files: &[FileChange]) -> ListItem<'st
 }
 
 fn move_file_cursor(session: &mut ReviewSession, state: &mut TuiState, delta: isize) {
-    let rows = visible_file_rows(session.files(), &state.expanded_dirs);
+    let rows = visible_file_rows(session, state);
     if rows.is_empty() {
         state.file_cursor = 0;
         return;
@@ -353,22 +402,20 @@ fn move_file_cursor(session: &mut ReviewSession, state: &mut TuiState, delta: is
 }
 
 fn activate_file_tree_row(session: &mut ReviewSession, state: &mut TuiState) -> bool {
-    let rows = visible_file_rows(session.files(), &state.expanded_dirs);
+    let rows = visible_file_rows(session, state);
     let Some(row) = rows.get(state.file_cursor) else {
         return false;
     };
 
     match row {
+        FileTreeRow::Section { .. } => false,
         FileTreeRow::Directory { path, expanded, .. } => {
             if *expanded {
                 state.expanded_dirs.remove(path);
             } else {
                 state.expanded_dirs.insert(path.clone());
             }
-            clamp_file_cursor(
-                state,
-                visible_file_rows(session.files(), &state.expanded_dirs).len(),
-            );
+            clamp_file_cursor(state, visible_file_rows(session, state).len());
             false
         }
         FileTreeRow::File { .. } => {
@@ -379,12 +426,13 @@ fn activate_file_tree_row(session: &mut ReviewSession, state: &mut TuiState) -> 
 }
 
 fn expand_file_tree_row(session: &mut ReviewSession, state: &mut TuiState) -> bool {
-    let rows = visible_file_rows(session.files(), &state.expanded_dirs);
+    let rows = visible_file_rows(session, state);
     let Some(row) = rows.get(state.file_cursor) else {
         return false;
     };
 
     match row {
+        FileTreeRow::Section { .. } => false,
         FileTreeRow::Directory { path, .. } => {
             state.expanded_dirs.insert(path.clone());
             false
@@ -397,12 +445,13 @@ fn expand_file_tree_row(session: &mut ReviewSession, state: &mut TuiState) -> bo
 }
 
 fn collapse_file_tree_row(session: &ReviewSession, state: &mut TuiState) {
-    let rows = visible_file_rows(session.files(), &state.expanded_dirs);
+    let rows = visible_file_rows(session, state);
     let Some(row) = rows.get(state.file_cursor) else {
         return;
     };
 
     match row {
+        FileTreeRow::Section { .. } => {}
         FileTreeRow::Directory { path, expanded, .. } => {
             if *expanded {
                 state.expanded_dirs.remove(path);
@@ -413,10 +462,7 @@ fn collapse_file_tree_row(session: &ReviewSession, state: &mut TuiState) {
         FileTreeRow::File { path, .. } => collapse_parent_directory(session, state, path),
     }
 
-    clamp_file_cursor(
-        state,
-        visible_file_rows(session.files(), &state.expanded_dirs).len(),
-    );
+    clamp_file_cursor(state, visible_file_rows(session, state).len());
 }
 
 fn collapse_parent_directory(session: &ReviewSession, state: &mut TuiState, path: &str) {
@@ -425,10 +471,10 @@ fn collapse_parent_directory(session: &ReviewSession, state: &mut TuiState, path
     };
 
     state.expanded_dirs.remove(&parent);
-    let rows = visible_file_rows(session.files(), &state.expanded_dirs);
+    let rows = visible_file_rows(session, state);
     if let Some(index) = rows.iter().position(|row| match row {
         FileTreeRow::Directory { path, .. } => path == &parent,
-        FileTreeRow::File { .. } => false,
+        FileTreeRow::Section { .. } | FileTreeRow::File { .. } => false,
     }) {
         state.file_cursor = index;
     }
@@ -440,6 +486,17 @@ fn select_file_row_if_file(session: &mut ReviewSession, row: &FileTreeRow) {
     }
 }
 
+fn sync_file_cursor_to_selected(session: &ReviewSession, state: &mut TuiState) {
+    let rows = visible_file_rows(session, state);
+    state.file_cursor = rows
+        .iter()
+        .position(|row| match row {
+            FileTreeRow::File { index, .. } => *index == session.selected_file_index(),
+            FileTreeRow::Section { .. } | FileTreeRow::Directory { .. } => false,
+        })
+        .unwrap_or_else(|| state.file_cursor.min(rows.len().saturating_sub(1)));
+}
+
 fn clamp_file_cursor(state: &mut TuiState, row_count: usize) {
     if row_count == 0 {
         state.file_cursor = 0;
@@ -448,17 +505,58 @@ fn clamp_file_cursor(state: &mut TuiState, row_count: usize) {
     }
 }
 
-fn visible_file_rows(files: &[FileChange], expanded_dirs: &BTreeSet<String>) -> Vec<FileTreeRow> {
-    let tree = build_file_tree(files);
+fn visible_file_rows(session: &ReviewSession, state: &TuiState) -> Vec<FileTreeRow> {
+    match state.file_tree_mode {
+        FileTreeMode::FullTree => visible_tree_rows(
+            session.files(),
+            &state.expanded_dirs,
+            &(0..session.files().len()).collect::<Vec<_>>(),
+            0,
+        ),
+        FileTreeMode::ReviewStatus => visible_review_status_rows(session, state),
+    }
+}
+
+fn visible_review_status_rows(session: &ReviewSession, state: &TuiState) -> Vec<FileTreeRow> {
+    let pending = file_indices_by_reviewed(session, false);
+    let reviewed = file_indices_by_reviewed(session, true);
     let mut rows = Vec::new();
-    collect_file_tree_rows(&tree, files, expanded_dirs, &mut rows, 0);
+
+    push_review_section(session.files(), &mut rows, "to review", &pending);
+    rows.extend(visible_tree_rows(
+        session.files(),
+        &state.expanded_dirs,
+        &pending,
+        1,
+    ));
+    push_review_section(session.files(), &mut rows, "reviewed", &reviewed);
+    rows.extend(visible_tree_rows(
+        session.files(),
+        &state.expanded_dirs,
+        &reviewed,
+        1,
+    ));
+
     rows
 }
 
-fn build_file_tree(files: &[FileChange]) -> FileTreeNode {
+fn visible_tree_rows(
+    files: &[FileChange],
+    expanded_dirs: &BTreeSet<String>,
+    indices: &[usize],
+    depth: usize,
+) -> Vec<FileTreeRow> {
+    let tree = build_file_tree(files, indices);
+    let mut rows = Vec::new();
+    collect_file_tree_rows(&tree, files, expanded_dirs, &mut rows, depth);
+    rows
+}
+
+fn build_file_tree(files: &[FileChange], indices: &[usize]) -> FileTreeNode {
     let mut root = FileTreeNode::default();
 
-    for (index, file) in files.iter().enumerate() {
+    for index in indices {
+        let file = &files[*index];
         let parts = file.path.split('/').collect::<Vec<_>>();
         let mut node = &mut root;
 
@@ -477,10 +575,42 @@ fn build_file_tree(files: &[FileChange]) -> FileTreeNode {
             node.deletions += file.deletions;
         }
 
-        node.files.push(index);
+        node.files.push(*index);
     }
 
     root
+}
+
+fn push_review_section(
+    files: &[FileChange],
+    rows: &mut Vec<FileTreeRow>,
+    name: &str,
+    indices: &[usize],
+) {
+    let (additions, deletions) = indices
+        .iter()
+        .fold((0, 0), |(additions, deletions), index| {
+            (
+                additions + files[*index].additions,
+                deletions + files[*index].deletions,
+            )
+        });
+
+    rows.push(FileTreeRow::Section {
+        name: name.to_owned(),
+        file_count: indices.len(),
+        additions,
+        deletions,
+    });
+}
+
+fn file_indices_by_reviewed(session: &ReviewSession, reviewed: bool) -> Vec<usize> {
+    session
+        .files()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, _)| (session.is_file_reviewed(index) == reviewed).then_some(index))
+        .collect()
 }
 
 fn collect_file_tree_rows(
@@ -751,7 +881,7 @@ fn render_footer(frame: &mut Frame, area: Rect, focus: FocusPane) {
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(format!("{focused} "), base().fg(YELLOW)),
         Span::styled(
-            "tab panes  files: h collapse, l/enter open  j/k move  n/p diff  q quit",
+            "tab panes  1 tree  2 review  r reviewed  h/l tree  j/k move  n/p diff  q quit",
             muted(),
         ),
     ]))

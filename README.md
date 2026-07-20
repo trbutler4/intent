@@ -55,12 +55,19 @@ The GPUI app needs a Wayland or X11 session. It will not open from a plain TTY w
 ## TUI Controls
 
 - `tab` switches panes
+- `1` shows the full changed-file tree
+- `2` shows files split into `to review` and `reviewed` sections
+- `r` toggles the selected file reviewed/unreviewed
 - In the file tree, `h`/left collapses directories
 - In the file tree, `l`/right expands directories or opens files in the diff pane
 - In the file tree, `enter` or `space` also opens a file in the diff pane
 - `j`, `k`, up, down move within the focused pane
 - `n`, `p`, `]`, `[` jump between changed blocks in the diff
 - `q` or `esc` quits
+
+## Persistence
+
+Reviewed-file state is persisted in SQLite at `.intent/review-tool.sqlite3` inside the repo. Entries are keyed by branch/review, file path, and the current file diff hash, so a file becomes unreviewed again when its diff changes. The `.intent/` directory is ignored by Git and can be deleted with the repo or removed to reset local review state.
 
 ## Build Check
 
@@ -74,4 +81,4 @@ nix develop path:. -c cargo check
 
 1. Add hunk selection and context budgeting.
 2. Plug in a real model backend.
-3. Persist review sessions and inline comments.
+3. Persist inline comments.
