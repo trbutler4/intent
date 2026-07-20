@@ -83,6 +83,7 @@ Backend flags work by preferring one Linux display backend at startup:
 - `R` hides/shows the review pane
 - `1` shows the full changed-file tree
 - `2` shows files split into `to review` and `reviewed` sections
+- `e` opens the selected file tree file in `$EDITOR`; quitting the editor returns to Intent
 - `r` toggles the selected file reviewed/unreviewed
 - In the file tree, `h`/left collapses sections or directories
 - In the file tree, `l`/right expands sections/directories or opens files in the diff pane

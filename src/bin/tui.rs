@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io,
+    env, io,
+    path::Path,
+    process::Command,
     time::Duration,
 };
 
@@ -79,6 +81,7 @@ struct TuiState {
     review_visible: bool,
     dragging_boundary: Option<PaneBoundary>,
     last_body_area: Option<Rect>,
+    status_message: Option<String>,
 }
 
 impl TuiState {
@@ -98,6 +101,7 @@ impl TuiState {
             review_visible: true,
             dragging_boundary: None,
             last_body_area: None,
+            status_message: None,
         };
 
         sync_file_cursor_to_selected(session, &mut state);
@@ -112,6 +116,12 @@ struct BodyChunks {
     diff: Rect,
     review_separator: Option<Rect>,
     review: Option<Rect>,
+}
+
+enum EditorStatus {
+    Opened,
+    Exited(i32),
+    Failed(io::Error),
 }
 
 #[derive(Default)]
@@ -183,7 +193,10 @@ fn main() -> io::Result<()> {
     result
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut session: ReviewSession) -> io::Result<()> {
+fn run_app<B>(terminal: &mut Terminal<B>, mut session: ReviewSession) -> io::Result<()>
+where
+    B: Backend + io::Write,
+{
     let mut state = TuiState::new(&session);
 
     loop {
@@ -204,6 +217,9 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut session: ReviewSession) -
                     KeyCode::Tab => state.focus = next_focus(&state),
                     KeyCode::Char('f') => toggle_files_pane(&mut state),
                     KeyCode::Char('R') => toggle_review_pane(&mut state),
+                    KeyCode::Char('e') => {
+                        open_selected_file_in_editor(terminal, &session, &mut state)?
+                    }
                     KeyCode::Char('1') => {
                         state.file_tree_mode = FileTreeMode::FullTree;
                         sync_file_cursor_to_selected(&session, &mut state);
@@ -549,6 +565,92 @@ fn contains_point(area: Rect, column: u16, row: u16) -> bool {
         && column < area.x.saturating_add(area.width)
         && row >= area.y
         && row < area.y.saturating_add(area.height)
+}
+
+fn open_selected_file_in_editor<B>(
+    terminal: &mut Terminal<B>,
+    session: &ReviewSession,
+    state: &mut TuiState,
+) -> io::Result<()>
+where
+    B: Backend + io::Write,
+{
+    if state.focus != FocusPane::Files {
+        state.status_message = Some("focus the file tree before opening an editor".to_owned());
+        return Ok(());
+    }
+
+    let rows = visible_file_rows(session, state);
+    let Some(FileTreeRow::File { index, .. }) = rows.get(state.file_cursor) else {
+        state.status_message = Some("select a file to open in $EDITOR".to_owned());
+        return Ok(());
+    };
+
+    let Some(editor) = env::var("EDITOR")
+        .ok()
+        .map(|editor| editor.trim().to_owned())
+        .filter(|editor| !editor.is_empty())
+    else {
+        state.status_message = Some("EDITOR is not set".to_owned());
+        return Ok(());
+    };
+
+    let file = &session.files()[*index];
+    let path = session.repo_root().join(&file.path);
+    let status = run_editor(terminal, &editor, &path)?;
+    state.status_message = Some(match status {
+        EditorStatus::Opened => format!("returned from editor: {}", file.path),
+        EditorStatus::Exited(code) => format!("editor exited with status {code}: {}", file.path),
+        EditorStatus::Failed(error) => format!("failed to run editor: {error}"),
+    });
+    Ok(())
+}
+
+fn run_editor<B>(terminal: &mut Terminal<B>, editor: &str, path: &Path) -> io::Result<EditorStatus>
+where
+    B: Backend + io::Write,
+{
+    suspend_tui(terminal)?;
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(r#"$EDITOR "$1""#)
+        .arg("intent-editor")
+        .arg(path)
+        .env("EDITOR", editor)
+        .status();
+    restore_tui(terminal)?;
+
+    Ok(match status {
+        Ok(status) if status.success() => EditorStatus::Opened,
+        Ok(status) => EditorStatus::Exited(status.code().unwrap_or(-1)),
+        Err(error) => EditorStatus::Failed(error),
+    })
+}
+
+fn suspend_tui<B>(terminal: &mut Terminal<B>) -> io::Result<()>
+where
+    B: Backend + io::Write,
+{
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
+    terminal.show_cursor()
+}
+
+fn restore_tui<B>(terminal: &mut Terminal<B>) -> io::Result<()>
+where
+    B: Backend + io::Write,
+{
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
+    terminal.clear()
 }
 
 fn render_files(
@@ -1281,16 +1383,20 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &TuiState) {
     };
     let files_visible = if state.files_visible { "on" } else { "off" };
     let review_visible = if state.review_visible { "on" } else { "off" };
-    let footer = Paragraph::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!("{focused} "), base().fg(YELLOW)),
         Span::styled(
             format!(
-                "tab panes  f files:{files_visible}  R review:{review_visible}  r reviewed  h/l tree  q quit"
+                "tab panes  f files:{files_visible}  R review:{review_visible}  e edit  r reviewed  q quit"
             ),
             muted(),
         ),
-    ]))
-    .style(base());
+    ];
+    if let Some(message) = &state.status_message {
+        spans.push(Span::styled("  |  ", muted()));
+        spans.push(Span::styled(message.clone(), base().fg(AQUA)));
+    }
+    let footer = Paragraph::new(Line::from(spans)).style(base());
 
     frame.render_widget(footer, area);
 }

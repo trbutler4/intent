@@ -99,6 +99,7 @@ pub struct ReviewSession {
     selected_file: usize,
     selected_finding: usize,
     selected_diff_line: usize,
+    repo_root: PathBuf,
     repo_label: String,
     review_label: String,
     backend_label: String,
@@ -177,6 +178,7 @@ impl ReviewSession {
             selected_file: 0,
             selected_finding: 0,
             selected_diff_line,
+            repo_root: repo_root.clone(),
             repo_label: repo_label(&repo_root),
             review_label: review_label(&repo_root),
             backend_label: "not configured".to_owned(),
@@ -194,6 +196,7 @@ impl ReviewSession {
             selected_file: 0,
             selected_finding: 0,
             selected_diff_line: 0,
+            repo_root: PathBuf::new(),
             repo_label: "unknown repo".to_owned(),
             review_label: "load error".to_owned(),
             backend_label: "not configured".to_owned(),
@@ -230,6 +233,10 @@ impl ReviewSession {
 
     pub fn repo_label(&self) -> &str {
         &self.repo_label
+    }
+
+    pub fn repo_root(&self) -> &Path {
+        &self.repo_root
     }
 
     pub fn review_label(&self) -> &str {
@@ -806,7 +813,7 @@ fn git_output_bytes(repo_root: &Path, args: &[&str]) -> Result<Vec<u8>, ReviewEr
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, path::PathBuf};
 
     use super::{
         parse_hunk_header, parse_unified_diff, DiffLine, FileChange, ReviewAction, ReviewSession,
@@ -817,6 +824,7 @@ mod tests {
             selected_file: 0,
             selected_finding: 0,
             selected_diff_line: 1,
+            repo_root: PathBuf::new(),
             repo_label: "repo".to_owned(),
             review_label: "working tree".to_owned(),
             backend_label: "not configured".to_owned(),
