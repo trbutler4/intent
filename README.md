@@ -55,7 +55,9 @@ The GPUI app needs a Wayland or X11 session. It will not open from a plain TTY w
 ## TUI Controls
 
 - `tab` switches panes
-- In the file tree, `h`, `l`, left, right, enter, space collapse and expand directories
+- In the file tree, `h`/left collapses directories
+- In the file tree, `l`/right expands directories or opens files in the diff pane
+- In the file tree, `enter` or `space` also opens a file in the diff pane
 - `j`, `k`, up, down move within the focused pane
 - `n`, `p`, `]`, `[` jump between changed blocks in the diff
 - `q` or `esc` quits

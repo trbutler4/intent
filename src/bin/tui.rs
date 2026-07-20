@@ -153,13 +153,21 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut session: ReviewSession) -
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 if state.focus == FocusPane::Files {
-                    expand_file_tree_row(&mut session, &mut state);
+                    state.focus = if expand_file_tree_row(&mut session, &mut state) {
+                        FocusPane::Diff
+                    } else {
+                        state.focus
+                    };
                 } else {
                     state.focus = next_focus(state.focus);
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ') if state.focus == FocusPane::Files => {
-                toggle_file_tree_row(&mut session, &mut state);
+                state.focus = if activate_file_tree_row(&mut session, &mut state) {
+                    FocusPane::Diff
+                } else {
+                    state.focus
+                };
             }
             KeyCode::Char('n') | KeyCode::Char(']') => {
                 session.apply(ReviewAction::NextDiffChange);
@@ -344,10 +352,10 @@ fn move_file_cursor(session: &mut ReviewSession, state: &mut TuiState, delta: is
     select_file_row_if_file(session, &rows[state.file_cursor]);
 }
 
-fn toggle_file_tree_row(session: &mut ReviewSession, state: &mut TuiState) {
+fn activate_file_tree_row(session: &mut ReviewSession, state: &mut TuiState) -> bool {
     let rows = visible_file_rows(session.files(), &state.expanded_dirs);
     let Some(row) = rows.get(state.file_cursor) else {
-        return;
+        return false;
     };
 
     match row {
@@ -361,22 +369,30 @@ fn toggle_file_tree_row(session: &mut ReviewSession, state: &mut TuiState) {
                 state,
                 visible_file_rows(session.files(), &state.expanded_dirs).len(),
             );
+            false
         }
-        FileTreeRow::File { .. } => select_file_row_if_file(session, row),
+        FileTreeRow::File { .. } => {
+            select_file_row_if_file(session, row);
+            true
+        }
     }
 }
 
-fn expand_file_tree_row(session: &mut ReviewSession, state: &mut TuiState) {
+fn expand_file_tree_row(session: &mut ReviewSession, state: &mut TuiState) -> bool {
     let rows = visible_file_rows(session.files(), &state.expanded_dirs);
     let Some(row) = rows.get(state.file_cursor) else {
-        return;
+        return false;
     };
 
     match row {
         FileTreeRow::Directory { path, .. } => {
             state.expanded_dirs.insert(path.clone());
+            false
         }
-        FileTreeRow::File { .. } => select_file_row_if_file(session, row),
+        FileTreeRow::File { .. } => {
+            select_file_row_if_file(session, row);
+            true
+        }
     }
 }
 
@@ -735,7 +751,7 @@ fn render_footer(frame: &mut Frame, area: Rect, focus: FocusPane) {
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(format!("{focused} "), base().fg(YELLOW)),
         Span::styled(
-            "tab panes  files: h/l or enter collapse/expand  j/k move  n/p diff  q quit",
+            "tab panes  files: h collapse, l/enter open  j/k move  n/p diff  q quit",
             muted(),
         ),
     ]))
