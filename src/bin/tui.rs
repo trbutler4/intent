@@ -273,7 +273,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut session: ReviewSession) -
 fn render(frame: &mut Frame, session: &ReviewSession, state: &mut TuiState) {
     reset_diff_scroll_on_file_change(session, state);
     ensure_focus_visible(state);
-    frame.render_widget(Block::default().style(base()), frame.area());
+    clear_area(frame, frame.area());
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -386,6 +386,7 @@ fn body_chunks(area: Rect, state: &TuiState) -> BodyChunks {
 
 fn render_separator(frame: &mut Frame, area: Rect, active: bool) {
     let color = if active { YELLOW } else { BG_SOFT };
+    clear_area(frame, area);
     frame.render_widget(Block::default().style(base().bg(color)), area);
 }
 
