@@ -65,6 +65,11 @@
             LD_LIBRARY_PATH = pkgs'.lib.makeLibraryPath linuxLibraries;
             LIBCLANG_PATH = "${pkgs'.llvmPackages.libclang.lib}/lib";
             RUST_BACKTRACE = "1";
+            shellHook = ''
+              if [ -z "''${DISPLAY:-}" ] && [ -z "''${WAYLAND_DISPLAY:-}" ]; then
+                unset GIT_ASKPASS SSH_ASKPASS
+              fi
+            '';
           };
         };
     };

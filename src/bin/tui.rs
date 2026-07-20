@@ -14,7 +14,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 use review_tool::engine::{DiffLine, FileChange, Finding, ReviewAction, ReviewSession};
@@ -50,6 +50,7 @@ struct TuiState {
     expanded_dirs: BTreeSet<String>,
     file_cursor: usize,
     file_tree_mode: FileTreeMode,
+    last_selected_file: Option<usize>,
 }
 
 impl TuiState {
@@ -61,6 +62,7 @@ impl TuiState {
             expanded_dirs,
             file_cursor: 0,
             file_tree_mode: FileTreeMode::ReviewStatus,
+            last_selected_file: selected_file_index(session),
         };
 
         sync_file_cursor_to_selected(session, &mut state);
@@ -215,6 +217,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut session: ReviewSession) -
 }
 
 fn render(frame: &mut Frame, session: &ReviewSession, state: &mut TuiState) {
+    reset_diff_scroll_on_file_change(session, state);
     frame.render_widget(Block::default().style(base()), frame.area());
 
     let layout = Layout::default()
@@ -289,6 +292,8 @@ fn render_files(
     state: &mut TuiState,
     focused: bool,
 ) {
+    clear_area(frame, area);
+
     let rows = visible_file_rows(session, state);
     clamp_file_cursor(state, rows.len());
 
@@ -688,6 +693,8 @@ fn render_diff(
     state: &mut TuiState,
     focused: bool,
 ) {
+    clear_area(frame, area);
+
     let mut title = session
         .selected_file()
         .map(|file| file.path.clone())
@@ -757,6 +764,8 @@ fn ensure_selected_diff_visible(state: &mut TuiState, area: Rect, session: &Revi
 }
 
 fn render_review(frame: &mut Frame, area: Rect, session: &ReviewSession, focused: bool) {
+    clear_area(frame, area);
+
     let mut lines = vec![
         Line::from(Span::styled("summary", label_style())),
         Line::from(Span::styled(
@@ -872,7 +881,29 @@ fn panel_block(title: impl Into<String>, focused: bool) -> Block<'static> {
         .border_style(border_style)
 }
 
+fn clear_area(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(base()), area);
+}
+
+fn reset_diff_scroll_on_file_change(session: &ReviewSession, state: &mut TuiState) {
+    let selected_file = selected_file_index(session);
+    if state.last_selected_file != selected_file {
+        state.diff_scroll = 0;
+        state.last_selected_file = selected_file;
+    }
+}
+
+fn selected_file_index(session: &ReviewSession) -> Option<usize> {
+    session
+        .selected_file()
+        .is_some()
+        .then_some(session.selected_file_index())
+}
+
 fn render_footer(frame: &mut Frame, area: Rect, focus: FocusPane) {
+    clear_area(frame, area);
+
     let focused = match focus {
         FocusPane::Files => "files",
         FocusPane::Diff => "diff",
