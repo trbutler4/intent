@@ -5,7 +5,10 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+        MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -30,6 +33,17 @@ const BLUE: Color = Color::Rgb(131, 165, 152);
 const AQUA: Color = Color::Rgb(142, 192, 124);
 const ORANGE: Color = Color::Rgb(254, 128, 25);
 const PURPLE: Color = Color::Rgb(211, 134, 155);
+const DEFAULT_FILES_WIDTH: u16 = 28;
+const DEFAULT_REVIEW_WIDTH: u16 = 34;
+const MIN_FILES_WIDTH: u16 = 18;
+const MIN_DIFF_WIDTH: u16 = 24;
+const MIN_REVIEW_WIDTH: u16 = 20;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneBoundary {
+    FilesDiff,
+    DiffReview,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FocusPane {
@@ -44,13 +58,26 @@ enum FileTreeMode {
     FullTree,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ReviewSection {
+    Pending,
+    Reviewed,
+}
+
 struct TuiState {
     focus: FocusPane,
     diff_scroll: u16,
     expanded_dirs: BTreeSet<String>,
+    collapsed_review_sections: BTreeSet<ReviewSection>,
     file_cursor: usize,
     file_tree_mode: FileTreeMode,
     last_selected_file: Option<usize>,
+    files_width: u16,
+    review_width: u16,
+    files_visible: bool,
+    review_visible: bool,
+    dragging_boundary: Option<PaneBoundary>,
+    last_body_area: Option<Rect>,
 }
 
 impl TuiState {
@@ -60,14 +87,30 @@ impl TuiState {
             focus: FocusPane::Files,
             diff_scroll: 0,
             expanded_dirs,
+            collapsed_review_sections: BTreeSet::new(),
             file_cursor: 0,
             file_tree_mode: FileTreeMode::ReviewStatus,
             last_selected_file: selected_file_index(session),
+            files_width: DEFAULT_FILES_WIDTH,
+            review_width: DEFAULT_REVIEW_WIDTH,
+            files_visible: true,
+            review_visible: true,
+            dragging_boundary: None,
+            last_body_area: None,
         };
 
         sync_file_cursor_to_selected(session, &mut state);
         state
     }
+}
+
+#[derive(Clone, Copy)]
+struct BodyChunks {
+    files: Option<Rect>,
+    files_separator: Option<Rect>,
+    diff: Rect,
+    review_separator: Option<Rect>,
+    review: Option<Rect>,
 }
 
 #[derive(Default)]
@@ -93,7 +136,9 @@ impl FileTreeNode {
 
 enum FileTreeRow {
     Section {
+        section: ReviewSection,
         name: String,
+        expanded: bool,
         file_count: usize,
         additions: usize,
         deletions: usize,
@@ -120,14 +165,18 @@ fn main() -> io::Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let result = run_app(&mut terminal, session);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     result
@@ -143,72 +192,77 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut session: ReviewSession) -
             continue;
         }
 
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
+        match event::read()? {
+            Event::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
 
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => break,
-            KeyCode::Tab => state.focus = next_focus(state.focus),
-            KeyCode::Char('1') => {
-                state.file_tree_mode = FileTreeMode::FullTree;
-                sync_file_cursor_to_selected(&session, &mut state);
-            }
-            KeyCode::Char('2') => {
-                state.file_tree_mode = FileTreeMode::ReviewStatus;
-                sync_file_cursor_to_selected(&session, &mut state);
-            }
-            KeyCode::Char('r') => {
-                session.apply(ReviewAction::ToggleSelectedFileReviewed);
-                sync_file_cursor_to_selected(&session, &mut state);
-            }
-            KeyCode::Left | KeyCode::Char('h') => {
-                if state.focus == FocusPane::Files {
-                    collapse_file_tree_row(&session, &mut state);
-                } else {
-                    state.focus = previous_focus(state.focus);
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Tab => state.focus = next_focus(&state),
+                    KeyCode::Char('f') => toggle_files_pane(&mut state),
+                    KeyCode::Char('R') => toggle_review_pane(&mut state),
+                    KeyCode::Char('1') => {
+                        state.file_tree_mode = FileTreeMode::FullTree;
+                        sync_file_cursor_to_selected(&session, &mut state);
+                    }
+                    KeyCode::Char('2') => {
+                        state.file_tree_mode = FileTreeMode::ReviewStatus;
+                        sync_file_cursor_to_selected(&session, &mut state);
+                    }
+                    KeyCode::Char('r') => {
+                        session.apply(ReviewAction::ToggleSelectedFileReviewed);
+                        expand_selected_review_section(&session, &mut state);
+                        sync_file_cursor_to_selected(&session, &mut state);
+                    }
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        if state.focus == FocusPane::Files {
+                            collapse_file_tree_row(&session, &mut state);
+                        } else {
+                            state.focus = previous_focus(&state);
+                        }
+                    }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        if state.focus == FocusPane::Files {
+                            state.focus = if expand_file_tree_row(&mut session, &mut state) {
+                                FocusPane::Diff
+                            } else {
+                                state.focus
+                            };
+                        } else {
+                            state.focus = next_focus(&state);
+                        }
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') if state.focus == FocusPane::Files => {
+                        state.focus = if activate_file_tree_row(&mut session, &mut state) {
+                            FocusPane::Diff
+                        } else {
+                            state.focus
+                        };
+                    }
+                    KeyCode::Char('n') | KeyCode::Char(']') => {
+                        session.apply(ReviewAction::NextDiffChange);
+                        state.focus = FocusPane::Diff;
+                    }
+                    KeyCode::Char('p') | KeyCode::Char('[') => {
+                        session.apply(ReviewAction::PreviousDiffChange);
+                        state.focus = FocusPane::Diff;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => match state.focus {
+                        FocusPane::Files => move_file_cursor(&mut session, &mut state, 1),
+                        FocusPane::Diff => session.apply(ReviewAction::NextDiffChange),
+                        FocusPane::Findings => session.apply(ReviewAction::NextFinding),
+                    },
+                    KeyCode::Up | KeyCode::Char('k') => match state.focus {
+                        FocusPane::Files => move_file_cursor(&mut session, &mut state, -1),
+                        FocusPane::Diff => session.apply(ReviewAction::PreviousDiffChange),
+                        FocusPane::Findings => session.apply(ReviewAction::PreviousFinding),
+                    },
+                    _ => {}
                 }
             }
-            KeyCode::Right | KeyCode::Char('l') => {
-                if state.focus == FocusPane::Files {
-                    state.focus = if expand_file_tree_row(&mut session, &mut state) {
-                        FocusPane::Diff
-                    } else {
-                        state.focus
-                    };
-                } else {
-                    state.focus = next_focus(state.focus);
-                }
-            }
-            KeyCode::Enter | KeyCode::Char(' ') if state.focus == FocusPane::Files => {
-                state.focus = if activate_file_tree_row(&mut session, &mut state) {
-                    FocusPane::Diff
-                } else {
-                    state.focus
-                };
-            }
-            KeyCode::Char('n') | KeyCode::Char(']') => {
-                session.apply(ReviewAction::NextDiffChange);
-                state.focus = FocusPane::Diff;
-            }
-            KeyCode::Char('p') | KeyCode::Char('[') => {
-                session.apply(ReviewAction::PreviousDiffChange);
-                state.focus = FocusPane::Diff;
-            }
-            KeyCode::Down | KeyCode::Char('j') => match state.focus {
-                FocusPane::Files => move_file_cursor(&mut session, &mut state, 1),
-                FocusPane::Diff => session.apply(ReviewAction::NextDiffChange),
-                FocusPane::Findings => session.apply(ReviewAction::NextFinding),
-            },
-            KeyCode::Up | KeyCode::Char('k') => match state.focus {
-                FocusPane::Files => move_file_cursor(&mut session, &mut state, -1),
-                FocusPane::Diff => session.apply(ReviewAction::PreviousDiffChange),
-                FocusPane::Findings => session.apply(ReviewAction::PreviousFinding),
-            },
+            Event::Mouse(mouse) => handle_mouse_event(mouse, &mut state),
             _ => {}
         }
     }
@@ -218,6 +272,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut session: ReviewSession) -
 
 fn render(frame: &mut Frame, session: &ReviewSession, state: &mut TuiState) {
     reset_diff_scroll_on_file_change(session, state);
+    ensure_focus_visible(state);
     frame.render_widget(Block::default().style(base()), frame.area());
 
     let layout = Layout::default()
@@ -231,7 +286,7 @@ fn render(frame: &mut Frame, session: &ReviewSession, state: &mut TuiState) {
 
     render_header(frame, layout[0], session);
     render_body(frame, layout[1], session, state);
-    render_footer(frame, layout[2], state.focus);
+    render_footer(frame, layout[2], state);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, session: &ReviewSession) {
@@ -254,35 +309,244 @@ fn render_header(frame: &mut Frame, area: Rect, session: &ReviewSession) {
 }
 
 fn render_body(frame: &mut Frame, area: Rect, session: &ReviewSession, state: &mut TuiState) {
+    state.last_body_area = Some(area);
+    clamp_pane_widths(area, state);
+    let chunks = body_chunks(area, state);
+    let files_focused = state.focus == FocusPane::Files;
+    let diff_focused = state.focus == FocusPane::Diff;
+    let review_focused = state.focus == FocusPane::Findings;
+
+    if let Some(area) = chunks.files {
+        render_files(frame, area, session, state, files_focused);
+    }
+    if let Some(area) = chunks.files_separator {
+        render_separator(
+            frame,
+            area,
+            state.dragging_boundary == Some(PaneBoundary::FilesDiff),
+        );
+    }
+    render_diff(frame, chunks.diff, session, state, diff_focused);
+    if let Some(area) = chunks.review_separator {
+        render_separator(
+            frame,
+            area,
+            state.dragging_boundary == Some(PaneBoundary::DiffReview),
+        );
+    }
+    if let Some(area) = chunks.review {
+        render_review(frame, area, session, review_focused);
+    }
+}
+
+fn body_chunks(area: Rect, state: &TuiState) -> BodyChunks {
+    let mut constraints = Vec::new();
+    if state.files_visible {
+        constraints.push(Constraint::Length(state.files_width));
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Min(MIN_DIFF_WIDTH));
+    if state.review_visible {
+        constraints.push(Constraint::Length(1));
+        constraints.push(Constraint::Length(state.review_width));
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(28),
-            Constraint::Min(42),
-            Constraint::Length(34),
-        ])
+        .constraints(constraints)
         .split(area);
+    let mut index = 0;
+    let files = state.files_visible.then(|| {
+        let area = chunks[index];
+        index += 1;
+        area
+    });
+    let files_separator = state.files_visible.then(|| {
+        let area = chunks[index];
+        index += 1;
+        area
+    });
+    let diff = chunks[index];
+    index += 1;
+    let review_separator = state.review_visible.then(|| {
+        let area = chunks[index];
+        index += 1;
+        area
+    });
+    let review = state.review_visible.then(|| chunks[index]);
 
-    render_files(
-        frame,
-        chunks[0],
-        session,
-        state,
-        state.focus == FocusPane::Files,
-    );
-    render_diff(
-        frame,
-        chunks[1],
-        session,
-        state,
-        state.focus == FocusPane::Diff,
-    );
-    render_review(
-        frame,
-        chunks[2],
-        session,
-        state.focus == FocusPane::Findings,
-    );
+    BodyChunks {
+        files,
+        files_separator,
+        diff,
+        review_separator,
+        review,
+    }
+}
+
+fn render_separator(frame: &mut Frame, area: Rect, active: bool) {
+    let color = if active { YELLOW } else { BG_SOFT };
+    frame.render_widget(Block::default().style(base().bg(color)), area);
+}
+
+fn handle_mouse_event(mouse: MouseEvent, state: &mut TuiState) {
+    let Some(area) = state.last_body_area else {
+        return;
+    };
+
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            state.dragging_boundary = pane_boundary_at(area, state, mouse.column, mouse.row);
+            if state.dragging_boundary.is_none() {
+                update_focus_from_mouse(area, state, mouse.column, mouse.row);
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(boundary) = state.dragging_boundary {
+                resize_panes(area, state, boundary, mouse.column);
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => state.dragging_boundary = None,
+        _ => {}
+    }
+}
+
+fn pane_boundary_at(area: Rect, state: &TuiState, column: u16, row: u16) -> Option<PaneBoundary> {
+    if !contains_point(area, column, row) {
+        return None;
+    }
+
+    let chunks = body_chunks(area, state);
+    if chunks
+        .files_separator
+        .is_some_and(|area| contains_point(area, column, row))
+    {
+        Some(PaneBoundary::FilesDiff)
+    } else if chunks
+        .review_separator
+        .is_some_and(|area| contains_point(area, column, row))
+    {
+        Some(PaneBoundary::DiffReview)
+    } else {
+        None
+    }
+}
+
+fn update_focus_from_mouse(area: Rect, state: &mut TuiState, column: u16, row: u16) {
+    if !contains_point(area, column, row) {
+        return;
+    }
+
+    let chunks = body_chunks(area, state);
+    state.focus = if chunks
+        .files
+        .is_some_and(|area| contains_point(area, column, row))
+    {
+        FocusPane::Files
+    } else if contains_point(chunks.diff, column, row) {
+        FocusPane::Diff
+    } else if chunks
+        .review
+        .is_some_and(|area| contains_point(area, column, row))
+    {
+        FocusPane::Findings
+    } else {
+        state.focus
+    };
+}
+
+fn resize_panes(area: Rect, state: &mut TuiState, boundary: PaneBoundary, column: u16) {
+    if area.width == 0 {
+        return;
+    }
+
+    let right = area.x.saturating_add(area.width);
+    let column = column.clamp(area.x, right.saturating_sub(1));
+
+    match boundary {
+        PaneBoundary::FilesDiff if state.files_visible => {
+            state.files_width = column.saturating_sub(area.x);
+        }
+        PaneBoundary::DiffReview => {
+            if state.review_visible {
+                state.review_width = right.saturating_sub(column.saturating_add(1));
+            }
+        }
+        PaneBoundary::FilesDiff => {}
+    }
+
+    clamp_pane_widths(area, state);
+}
+
+fn clamp_pane_widths(area: Rect, state: &mut TuiState) {
+    let separator_count = u16::from(state.files_visible) + u16::from(state.review_visible);
+    let side_budget = area
+        .width
+        .saturating_sub(separator_count)
+        .saturating_sub(MIN_DIFF_WIDTH);
+    if side_budget == 0 {
+        return;
+    }
+
+    let min_files = if state.files_visible {
+        MIN_FILES_WIDTH.min(side_budget)
+    } else {
+        0
+    };
+    let min_review = if state.review_visible {
+        MIN_REVIEW_WIDTH.min(side_budget.saturating_sub(min_files))
+    } else {
+        0
+    };
+
+    if state.files_visible {
+        let max_files = side_budget.saturating_sub(min_review);
+        state.files_width = state.files_width.clamp(min_files, max_files);
+    }
+
+    if state.review_visible {
+        let used_files = if state.files_visible {
+            state.files_width
+        } else {
+            0
+        };
+        let max_review = side_budget.saturating_sub(used_files);
+        let min_review = MIN_REVIEW_WIDTH.min(max_review);
+        state.review_width = state.review_width.clamp(min_review, max_review);
+    }
+}
+
+fn toggle_files_pane(state: &mut TuiState) {
+    state.files_visible = !state.files_visible;
+    state.dragging_boundary = None;
+    ensure_focus_visible(state);
+}
+
+fn toggle_review_pane(state: &mut TuiState) {
+    state.review_visible = !state.review_visible;
+    state.dragging_boundary = None;
+    ensure_focus_visible(state);
+}
+
+fn ensure_focus_visible(state: &mut TuiState) {
+    if !is_focus_visible(state.focus, state) {
+        state.focus = FocusPane::Diff;
+    }
+}
+
+fn is_focus_visible(focus: FocusPane, state: &TuiState) -> bool {
+    match focus {
+        FocusPane::Files => state.files_visible,
+        FocusPane::Diff => true,
+        FocusPane::Findings => state.review_visible,
+    }
+}
+
+fn contains_point(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
 }
 
 fn render_files(
@@ -339,17 +603,23 @@ fn file_panel_title(session: &ReviewSession, mode: FileTreeMode) -> String {
 fn render_file_tree_row(row: &FileTreeRow, session: &ReviewSession) -> ListItem<'static> {
     match row {
         FileTreeRow::Section {
+            section: _,
             name,
+            expanded,
             file_count,
             additions,
             deletions,
-        } => ListItem::new(Line::from(vec![
-            Span::styled(name.clone(), label_style()),
-            Span::styled(
-                format!("  {file_count} files  +{additions} -{deletions}"),
-                muted(),
-            ),
-        ])),
+        } => {
+            let marker = if *expanded { "[-]" } else { "[+]" };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{marker} "), base().fg(YELLOW)),
+                Span::styled(name.clone(), label_style()),
+                Span::styled(
+                    format!("  {file_count} files  +{additions} -{deletions}"),
+                    muted(),
+                ),
+            ]))
+        }
         FileTreeRow::Directory {
             name,
             depth,
@@ -413,7 +683,11 @@ fn activate_file_tree_row(session: &mut ReviewSession, state: &mut TuiState) -> 
     };
 
     match row {
-        FileTreeRow::Section { .. } => false,
+        FileTreeRow::Section { section, .. } => {
+            toggle_review_section(state, *section);
+            clamp_file_cursor(state, visible_file_rows(session, state).len());
+            false
+        }
         FileTreeRow::Directory { path, expanded, .. } => {
             if *expanded {
                 state.expanded_dirs.remove(path);
@@ -437,7 +711,10 @@ fn expand_file_tree_row(session: &mut ReviewSession, state: &mut TuiState) -> bo
     };
 
     match row {
-        FileTreeRow::Section { .. } => false,
+        FileTreeRow::Section { section, .. } => {
+            state.collapsed_review_sections.remove(section);
+            false
+        }
         FileTreeRow::Directory { path, .. } => {
             state.expanded_dirs.insert(path.clone());
             false
@@ -456,7 +733,9 @@ fn collapse_file_tree_row(session: &ReviewSession, state: &mut TuiState) {
     };
 
     match row {
-        FileTreeRow::Section { .. } => {}
+        FileTreeRow::Section { section, .. } => {
+            state.collapsed_review_sections.insert(*section);
+        }
         FileTreeRow::Directory { path, expanded, .. } => {
             if *expanded {
                 state.expanded_dirs.remove(path);
@@ -468,6 +747,28 @@ fn collapse_file_tree_row(session: &ReviewSession, state: &mut TuiState) {
     }
 
     clamp_file_cursor(state, visible_file_rows(session, state).len());
+}
+
+fn toggle_review_section(state: &mut TuiState, section: ReviewSection) {
+    if !state.collapsed_review_sections.insert(section) {
+        state.collapsed_review_sections.remove(&section);
+    }
+}
+
+fn expand_selected_review_section(session: &ReviewSession, state: &mut TuiState) {
+    if state.file_tree_mode != FileTreeMode::ReviewStatus {
+        return;
+    }
+
+    let Some(index) = selected_file_index(session) else {
+        return;
+    };
+    let section = if session.is_file_reviewed(index) {
+        ReviewSection::Reviewed
+    } else {
+        ReviewSection::Pending
+    };
+    state.collapsed_review_sections.remove(&section);
 }
 
 fn collapse_parent_directory(session: &ReviewSession, state: &mut TuiState, path: &str) {
@@ -526,21 +827,45 @@ fn visible_review_status_rows(session: &ReviewSession, state: &TuiState) -> Vec<
     let pending = file_indices_by_reviewed(session, false);
     let reviewed = file_indices_by_reviewed(session, true);
     let mut rows = Vec::new();
+    let pending_expanded = !state
+        .collapsed_review_sections
+        .contains(&ReviewSection::Pending);
+    let reviewed_expanded = !state
+        .collapsed_review_sections
+        .contains(&ReviewSection::Reviewed);
 
-    push_review_section(session.files(), &mut rows, "to review", &pending);
-    rows.extend(visible_tree_rows(
+    push_review_section(
         session.files(),
-        &state.expanded_dirs,
+        &mut rows,
+        ReviewSection::Pending,
+        "to review",
+        pending_expanded,
         &pending,
-        1,
-    ));
-    push_review_section(session.files(), &mut rows, "reviewed", &reviewed);
-    rows.extend(visible_tree_rows(
+    );
+    if pending_expanded {
+        rows.extend(visible_tree_rows(
+            session.files(),
+            &state.expanded_dirs,
+            &pending,
+            1,
+        ));
+    }
+    push_review_section(
         session.files(),
-        &state.expanded_dirs,
+        &mut rows,
+        ReviewSection::Reviewed,
+        "reviewed",
+        reviewed_expanded,
         &reviewed,
-        1,
-    ));
+    );
+    if reviewed_expanded {
+        rows.extend(visible_tree_rows(
+            session.files(),
+            &state.expanded_dirs,
+            &reviewed,
+            1,
+        ));
+    }
 
     rows
 }
@@ -589,7 +914,9 @@ fn build_file_tree(files: &[FileChange], indices: &[usize]) -> FileTreeNode {
 fn push_review_section(
     files: &[FileChange],
     rows: &mut Vec<FileTreeRow>,
+    section: ReviewSection,
     name: &str,
+    expanded: bool,
     indices: &[usize],
 ) {
     let (additions, deletions) = indices
@@ -602,7 +929,9 @@ fn push_review_section(
         });
 
     rows.push(FileTreeRow::Section {
+        section,
         name: name.to_owned(),
+        expanded,
         file_count: indices.len(),
         additions,
         deletions,
@@ -901,18 +1230,22 @@ fn selected_file_index(session: &ReviewSession) -> Option<usize> {
         .then_some(session.selected_file_index())
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, focus: FocusPane) {
+fn render_footer(frame: &mut Frame, area: Rect, state: &TuiState) {
     clear_area(frame, area);
 
-    let focused = match focus {
+    let focused = match state.focus {
         FocusPane::Files => "files",
         FocusPane::Diff => "diff",
         FocusPane::Findings => "review",
     };
+    let files_visible = if state.files_visible { "on" } else { "off" };
+    let review_visible = if state.review_visible { "on" } else { "off" };
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(format!("{focused} "), base().fg(YELLOW)),
         Span::styled(
-            "tab panes  1 tree  2 review  r reviewed  h/l tree  j/k move  n/p diff  q quit",
+            format!(
+                "tab panes  f files:{files_visible}  R review:{review_visible}  r reviewed  h/l tree  q quit"
+            ),
             muted(),
         ),
     ]))
@@ -921,20 +1254,29 @@ fn render_footer(frame: &mut Frame, area: Rect, focus: FocusPane) {
     frame.render_widget(footer, area);
 }
 
-fn next_focus(focus: FocusPane) -> FocusPane {
-    match focus {
-        FocusPane::Files => FocusPane::Diff,
-        FocusPane::Diff => FocusPane::Findings,
-        FocusPane::Findings => FocusPane::Files,
-    }
+fn next_focus(state: &TuiState) -> FocusPane {
+    step_focus(state, 1)
 }
 
-fn previous_focus(focus: FocusPane) -> FocusPane {
-    match focus {
-        FocusPane::Files => FocusPane::Findings,
-        FocusPane::Diff => FocusPane::Files,
-        FocusPane::Findings => FocusPane::Diff,
+fn previous_focus(state: &TuiState) -> FocusPane {
+    step_focus(state, 2)
+}
+
+fn step_focus(state: &TuiState, delta: usize) -> FocusPane {
+    let order = [FocusPane::Files, FocusPane::Diff, FocusPane::Findings];
+    let current = order
+        .iter()
+        .position(|pane| *pane == state.focus)
+        .unwrap_or(1);
+
+    for offset in 1..=order.len() {
+        let candidate = order[(current + offset * delta) % order.len()];
+        if is_focus_visible(candidate, state) {
+            return candidate;
+        }
     }
+
+    FocusPane::Diff
 }
 
 fn status_style(status: &str) -> Style {

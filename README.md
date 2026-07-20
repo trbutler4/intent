@@ -2,19 +2,24 @@
 
 AI-assisted code review prototype with a shared review engine and separate GPUI/TUI frontends.
 
-## Current state
+## Project Goal
 
-- Shared review engine for files, diff lines, findings, and selection actions
-- Native 3-pane GPUI review shell
-- Terminal 3-pane TUI review shell
+The goal of this project is to create a code review tool that helps engineers understand code faster. It should handle large diffs, integrate GitHub discussions, and use LLMs to help with the review process.
+
+## Current State
+
+- Shared review engine for files, diff lines, findings, selection actions, and reviewed-file state
+- Terminal 3-pane TUI review shell, default for `cargo run`
+- Native GPUI review shells
 - Real Git working-tree changed files
 - Real unified diff viewer for staged, unstaged, and untracked text files
-- Empty AI findings panel ready for a review backend
-- Selection state for files and findings
+- Expandable changed-file tree with collapsible review status sections
+- SQLite-backed reviewed-file persistence
+- Lazy GPUI diff loading and data-flow graph prototype from the GPUI path
 
 ## Nix Shell
 
-The repo now includes a `flake.nix` with the Rust toolchain and Linux libraries needed by `gpui`.
+The repo includes a `flake.nix` with the Rust toolchain and native libraries needed by `gpui`.
 
 Use:
 
@@ -38,10 +43,23 @@ This is equivalent to:
 cargo run --bin review-tui
 ```
 
-Run the GPUI app with:
+Run the simpler GPUI shell with:
 
 ```sh
 cargo run --bin review-gui
+```
+
+Run the GPUI app that accepts a repo path with:
+
+```sh
+cargo run --bin review-tool -- /path/to/repo
+```
+
+You can also force the display backend for that GPUI path:
+
+```sh
+cargo run --bin review-tool -- --x11 /path/to/repo
+cargo run --bin review-tool -- --wayland /path/to/repo
 ```
 
 From a graphical desktop session, the one-shot command is:
@@ -50,17 +68,26 @@ From a graphical desktop session, the one-shot command is:
 nix develop path:. -c cargo run
 ```
 
-The GPUI app needs a Wayland or X11 session. It will not open from a plain TTY without `DISPLAY` or `WAYLAND_DISPLAY`. The TUI runs directly in a terminal.
+The GPUI apps need a Wayland or X11 session. They will not open from a plain TTY without `DISPLAY` or `WAYLAND_DISPLAY`. The TUI runs directly in a terminal.
+
+Backend flags work by preferring one Linux display backend at startup:
+
+1. `--x11` clears `WAYLAND_DISPLAY` before `gpui` initializes.
+2. `--wayland` clears `DISPLAY` before `gpui` initializes.
+3. If neither flag is passed, `gpui` keeps its default preference order.
 
 ## TUI Controls
 
 - `tab` switches panes
+- `f` hides/shows the files pane
+- `R` hides/shows the review pane
 - `1` shows the full changed-file tree
 - `2` shows files split into `to review` and `reviewed` sections
 - `r` toggles the selected file reviewed/unreviewed
-- In the file tree, `h`/left collapses directories
-- In the file tree, `l`/right expands directories or opens files in the diff pane
-- In the file tree, `enter` or `space` also opens a file in the diff pane
+- In the file tree, `h`/left collapses sections or directories
+- In the file tree, `l`/right expands sections/directories or opens files in the diff pane
+- In the file tree, `enter` or `space` toggles sections/directories or opens files in the diff pane
+- Drag the vertical pane separators with the mouse to resize panes
 - `j`, `k`, up, down move within the focused pane
 - `n`, `p`, `]`, `[` jump between changed blocks in the diff
 - `q` or `esc` quits
@@ -77,8 +104,16 @@ Validated with:
 nix develop path:. -c cargo check
 ```
 
-## Next steps
+Local repo behavior:
 
-1. Add hunk selection and context budgeting.
-2. Plug in a real model backend.
-3. Persist inline comments.
+1. If the repo has uncommitted changes, the app reviews the working tree against `HEAD`.
+2. If the repo is clean, the app reviews the latest commit.
+3. If the repo has no commits yet, the app shows the working tree only.
+4. Startup loads file metadata and line counts first, then loads the selected file's full diff on demand in the GPUI repo-path app.
+
+## Next Steps
+
+1. Add explicit base/head selection instead of the current auto mode.
+2. Add hunk selection and context budgeting.
+3. Plug in a real model backend.
+4. Persist inline comments.
