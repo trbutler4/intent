@@ -11,6 +11,7 @@ ratatui = "0.29"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tree-sitter = "0.26.8"
 tree-sitter-rust = "0.24.2"
+unicode-width = "0.2"
 
 [[bin]]
 name = "review-gui"

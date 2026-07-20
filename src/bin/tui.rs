@@ -21,6 +21,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use review_tool::engine::{DiffLine, FileChange, Finding, ReviewAction, ReviewSession};
+use unicode_width::UnicodeWidthChar;
 
 const BG: Color = Color::Rgb(40, 40, 40);
 const BG_SOFT: Color = Color::Rgb(60, 56, 54);
@@ -1024,6 +1025,7 @@ fn render_diff(
     focused: bool,
 ) {
     clear_area(frame, area);
+    let content_width = usize::from(area.width);
 
     let mut title = session
         .selected_file()
@@ -1033,15 +1035,16 @@ fn render_diff(
         title = format!("{title}  {position}/{total}");
     }
 
-    let mut lines = vec![Line::from(Span::styled(
+    let mut lines = vec![render_fixed_width_line(
         session
             .selected_file()
             .map(|file| format!("{}  +{} -{}", file.status, file.additions, file.deletions))
             .unwrap_or_else(|| "no changed file selected".to_owned()),
         muted(),
-    ))];
+        content_width,
+    )];
 
-    lines.push(Line::raw(""));
+    lines.push(render_fixed_width_line("", base(), content_width));
     let selected_diff_change_range = session.selected_diff_change_range();
     lines.extend(
         session
@@ -1054,6 +1057,7 @@ fn render_diff(
                     selected_diff_change_range
                         .as_ref()
                         .is_some_and(|range| range.contains(&index)),
+                    content_width,
                 )
             }),
     );
@@ -1174,7 +1178,7 @@ fn selected_finding_lines(finding: Option<&Finding>) -> Vec<Line<'static>> {
     }
 }
 
-fn render_diff_line(line: &DiffLine, selected: bool) -> Line<'static> {
+fn render_diff_line(line: &DiffLine, selected: bool, width: usize) -> Line<'static> {
     let style = match line.prefix.as_str() {
         "+" => base().fg(GREEN),
         "-" => base().fg(RED),
@@ -1188,13 +1192,49 @@ fn render_diff_line(line: &DiffLine, selected: bool) -> Line<'static> {
     };
     let marker = if selected { ">" } else { " " };
 
-    Line::from(Span::styled(
+    render_fixed_width_line(
         format!(
             "{} {:<2} {:>4} {}",
             marker, line.prefix, line.number, line.content
         ),
         style,
-    ))
+        width,
+    )
+}
+
+fn render_fixed_width_line(text: impl AsRef<str>, style: Style, width: usize) -> Line<'static> {
+    Line::from(Span::styled(fit_text_to_width(text.as_ref(), width), style))
+}
+
+fn fit_text_to_width(text: &str, width: usize) -> String {
+    let mut fitted = String::with_capacity(width);
+    let mut used_width = 0;
+
+    for ch in text.chars() {
+        if used_width >= width {
+            break;
+        }
+
+        if ch == '\t' {
+            let tab_width = 4 - (used_width % 4);
+            let spaces = tab_width.min(width - used_width);
+            fitted.extend(std::iter::repeat_n(' ', spaces));
+            used_width += spaces;
+            continue;
+        }
+
+        let ch = if ch.is_control() { ' ' } else { ch };
+        let ch_width = ch.width().unwrap_or(0);
+        if ch_width == 0 || used_width + ch_width > width {
+            continue;
+        }
+
+        fitted.push(ch);
+        used_width += ch_width;
+    }
+
+    fitted.extend(std::iter::repeat_n(' ', width.saturating_sub(used_width)));
+    fitted
 }
 
 fn panel_block(title: impl Into<String>, focused: bool) -> Block<'static> {
