@@ -1,5 +1,5 @@
 {
-  description = "GPUI-based AI review tool development shell";
+  description = "AI-assisted code review tool";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -28,6 +28,10 @@
             inherit system overlays;
           };
           rustToolchain = pkgs'.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          rustPlatform = pkgs'.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          };
 
           isLinux = pkgs'.stdenv.isLinux;
           isDarwin = pkgs'.stdenv.isDarwin;
@@ -65,8 +69,57 @@
           ];
 
           libraries = if isLinux then linuxLibraries else darwinLibraries;
+
+          intent = rustPlatform.buildRustPackage {
+            pname = "intent";
+            version = "0.1.0";
+            src = pkgs'.lib.cleanSource ./.;
+
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [
+              "--bin"
+              "review-tui"
+            ];
+
+            nativeBuildInputs = with pkgs'; [
+              clang
+              cmake
+              makeWrapper
+              pkg-config
+            ];
+
+            buildInputs = libraries;
+
+            LIBCLANG_PATH = "${pkgs'.llvmPackages.libclang.lib}/lib";
+
+            postInstall = ''
+              wrapProgram "$out/bin/review-tui" \
+                --prefix PATH : "${pkgs'.lib.makeBinPath [ pkgs'.git pkgs'.bash ]}"
+              ln -s "$out/bin/review-tui" "$out/bin/intent"
+            '';
+
+            meta = {
+              description = "Terminal-first AI-assisted code review tool";
+              mainProgram = "intent";
+            };
+          };
+          intentApp = {
+            type = "app";
+            program = "${intent}/bin/intent";
+            meta.description = "Run the Intent TUI";
+          };
         in
         {
+          packages = {
+            inherit intent;
+            default = intent;
+          };
+
+          apps = {
+            intent = intentApp;
+            default = intentApp;
+          };
+
           devShells.default = pkgs'.mkShell {
             packages =
               with pkgs'; [

@@ -10,6 +10,7 @@ The goal of this project is to create a code review tool that helps engineers un
 
 - Shared review engine for files, diff lines, findings, selection actions, and reviewed-file state
 - Terminal 3-pane TUI review shell, default for `cargo run`
+- Nix flake package for installing/running the TUI as `intent`
 - Native GPUI review shells
 - Real Git working-tree changed files
 - Real unified diff viewer for staged, unstaged, and untracked text files
@@ -28,6 +29,30 @@ nix develop path:.
 ```
 
 If `flake.nix` is tracked by Git, plain `nix develop` also works.
+
+## Nix Package
+
+Build the packaged TUI with:
+
+```sh
+nix build .#intent
+```
+
+Run it directly with:
+
+```sh
+nix run .#intent
+```
+
+The package installs both `intent` and `review-tui`; `intent` is the default app.
+
+In a NixOS flake, add this repo as an input and include the package:
+
+```nix
+environment.systemPackages = [
+  inputs.intent.packages.${pkgs.system}.default
+];
+```
 
 ## Run
 
@@ -103,6 +128,7 @@ Validated with:
 
 ```sh
 nix develop path:. -c cargo check
+nix build .#intent
 ```
 
 Local repo behavior:
